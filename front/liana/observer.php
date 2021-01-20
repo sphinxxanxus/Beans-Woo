@@ -24,6 +24,8 @@ class Observer {
 
         add_filter( 'woocommerce_get_shop_coupon_data', array( __CLASS__, 'getCoupon' ), 10, 2 );
 
+        add_action( 'woocommerce_checkout_order_processed', array( __CLASS__, 'orderPlaced' ), 10, 1 );
+        add_action( 'woocommerce_order_status_changed', array( __CLASS__, 'orderPaid' ), 10, 3 );
     }
 
     public static function clearSession() {
@@ -225,6 +227,94 @@ class Observer {
 
         unset( $_SESSION['liana_coupon'] );
         unset( $_SESSION['liana_debit'] );
+    }
+
+    public static function orderPlaced( $order_id ) {
+        $order = new \WC_Order( $order_id );
+
+        $account = null;
+
+        if ( isset( $_SESSION['liana_account'] ) ) {
+            $account = $_SESSION['liana_account'];
+        }
+
+        $coupon_codes = $order->get_coupon_codes();
+
+        foreach ( $coupon_codes as $code ) {
+
+            if ( $code === BEANS_LIANA_COUPON_UID ) {
+
+                if ( ! $account ) {
+                    throw new \Exception( 'Trying to redeem beans without beans account.' );
+                }
+
+                $coupon = new \WC_Coupon( $code );
+
+                $amount     = (double) ( property_exists( $coupon, 'coupon_amount' ) ? $coupon->coupon_amount : $coupon->amount );
+                $amount     = sprintf( '%0.2f', $amount );
+                $amount_str = sprintf( get_woocommerce_price_format(), get_woocommerce_currency_symbol(), $amount );
+
+                $data = array(
+                    'quantity'    => $amount,
+                    'rule'        => strtoupper( get_woocommerce_currency() ),
+                    'account'     => $account['id'],
+                    'description' => "Debited for a $amount_str discount",
+                    'uid'         => 'wc_' . $order->get_id() . '_' . $order->order_key,
+                    'commit'      => true
+                );
+
+                try {
+                    $debit = Helper::API()->post( '/liana/debit', $data );
+                } catch ( \Beans\Error\BaseError $e ) {
+                    if ( $e->getCode() != 409 ) {
+                        Helper::log( 'Debiting failed: ' . $e->getMessage() );
+                        throw new \Exception( 'Beans debit failed: ' . $e->getMessage() );
+                    }
+                }
+
+            }
+        }
+
+        self::cancelRedemption();
+        self::updateSession();
+    }
+
+    public static function orderPaid( $order_id, $old_status, $new_status ) {
+        $order   = new \WC_Order( $order_id );
+        $account = null;
+
+        try {
+            $account = Helper::API()->get( '/liana/account/' . $order->billing_email );
+        } catch ( \Beans\Error\ValidationError $e ) {
+            if ( $e->getCode() == 404 && $order->customer_user ) {
+                $account = self::createBeansAccount( $order->billing_email, $order->billing_first_name, $order->billing_last_name );
+            } else {
+                Helper::log( 'Looking for Beans account for crediting failed with message: ' . $e->getMessage() );
+            }
+        } catch ( \Beans\Error\BaseError $e ) {
+            Helper::log( 'Looking for Beans account for crediting failed with message: ' . $e->getMessage() );
+        }
+
+        if ( ! $account ) {
+            return;
+        }
+
+        $total = $order->get_total() - $order->get_shipping_total();
+
+        if ( $new_status == 'cancelled' ) {
+            $order_key = 'wc_' . $order->get_id() . '_' . $order->order_key;
+            try {
+                Helper::API()->post( "/liana/debit/$order_key/cancel" );
+            } catch ( \Beans\Error\BaseError $e ) {
+                Helper::log( 'Cancelling debit failed with message: ' . $e->getMessage() );
+            }
+            try {
+                Helper::API()->post( "/liana/credit/$order_key/cancel" );
+            } catch ( \Beans\Error\BaseError $e ) {
+                Helper::log( 'Cancelling credit failed with message: ' . $e->getMessage() );
+            }
+        }
+        self::updateSession();
     }
 
     public static function updateSession() {
