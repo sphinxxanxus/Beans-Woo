@@ -25,7 +25,6 @@ class Observer {
         add_filter( 'woocommerce_get_shop_coupon_data', array( __CLASS__, 'getCoupon' ), 10, 2 );
 
         add_action( 'woocommerce_checkout_order_processed', array( __CLASS__, 'orderPlaced' ), 10, 1 );
-        add_action( 'woocommerce_order_status_changed', array( __CLASS__, 'orderPaid' ), 10, 3 );
     }
 
     public static function clearSession() {
@@ -276,44 +275,6 @@ class Observer {
         }
 
         self::cancelRedemption();
-        self::updateSession();
-    }
-
-    public static function orderPaid( $order_id, $old_status, $new_status ) {
-        $order   = new \WC_Order( $order_id );
-        $account = null;
-
-        try {
-            $account = Helper::API()->get( '/liana/account/' . $order->billing_email );
-        } catch ( \Beans\Error\ValidationError $e ) {
-            if ( $e->getCode() == 404 && $order->customer_user ) {
-                $account = self::createBeansAccount( $order->billing_email, $order->billing_first_name, $order->billing_last_name );
-            } else {
-                Helper::log( 'Looking for Beans account for crediting failed with message: ' . $e->getMessage() );
-            }
-        } catch ( \Beans\Error\BaseError $e ) {
-            Helper::log( 'Looking for Beans account for crediting failed with message: ' . $e->getMessage() );
-        }
-
-        if ( ! $account ) {
-            return;
-        }
-
-        $total = $order->get_total() - $order->get_shipping_total();
-
-        if ( $new_status == 'cancelled' ) {
-            $order_key = 'wc_' . $order->get_id() . '_' . $order->order_key;
-            try {
-                Helper::API()->post( "/liana/debit/$order_key/cancel" );
-            } catch ( \Beans\Error\BaseError $e ) {
-                Helper::log( 'Cancelling debit failed with message: ' . $e->getMessage() );
-            }
-            try {
-                Helper::API()->post( "/liana/credit/$order_key/cancel" );
-            } catch ( \Beans\Error\BaseError $e ) {
-                Helper::log( 'Cancelling credit failed with message: ' . $e->getMessage() );
-            }
-        }
         self::updateSession();
     }
 
